@@ -68,6 +68,7 @@
     }
     .new-game:active, .undo:active { transform: scale(.96); filter: brightness(.94); }
     .undo { color: var(--ink); background: rgba(255,255,255,.10); box-shadow: none; }
+    .sound-toggle { min-width: 86px; }
     .undo:disabled { opacity: .4; cursor: default; }
 
     .game-shell { position: relative; width: 100%; padding: var(--gap); border-radius: 26px; background: var(--board); box-shadow: 0 22px 60px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.06); touch-action: none; user-select: none; }
@@ -126,7 +127,8 @@
 
     <section class="controls" aria-label="Controles de partida">
       <p>Desliza para mover las fichas</p>
-      <div style="display:flex; gap:8px">
+      <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end">
+        <button id="sound-toggle" class="undo sound-toggle" type="button" aria-pressed="true" aria-label="Silenciar sonidos y música">Audio: ON</button>
         <button id="undo" class="undo" type="button" disabled aria-label="Deshacer último movimiento">Deshacer</button>
         <button id="new-game" class="new-game" type="button">Nueva partida</button>
       </div>
@@ -169,6 +171,7 @@
       const overlayCopy = document.getElementById('overlay-copy');
       const continueBtn = document.getElementById('continue');
       const undoBtn = document.getElementById('undo');
+      const soundToggle = document.getElementById('sound-toggle');
       const gameShell = document.getElementById('game-shell');
       const newGameBtn = document.getElementById('new-game');
       const restartBtn = document.getElementById('restart');
@@ -179,6 +182,68 @@
       let won = false;
       let keepPlaying = false;
       let touchStart = null;
+      let audioContext = null;
+      let masterGain = null;
+      let musicTimer = null;
+      let musicStep = 0;
+      let audioEnabled = localStorage.getItem('merge2048-audio') !== 'off';
+
+      function ensureAudio() {
+        if (!audioEnabled) return null;
+        if (!audioContext) {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContext) return null;
+          audioContext = new AudioContext();
+          masterGain = audioContext.createGain();
+          masterGain.gain.value = .17;
+          masterGain.connect(audioContext.destination);
+        }
+        if (audioContext.state === 'suspended') audioContext.resume();
+        startMusic();
+        return audioContext;
+      }
+
+      function playTone(frequency, duration = .12, type = 'sine', volume = .08, delay = 0) {
+        const context = ensureAudio();
+        if (!context || !masterGain) return;
+        const start = context.currentTime + delay;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, start);
+        gain.gain.setValueAtTime(.0001, start);
+        gain.gain.exponentialRampToValueAtTime(volume, start + .015);
+        gain.gain.exponentialRampToValueAtTime(.0001, start + duration);
+        oscillator.connect(gain).connect(masterGain);
+        oscillator.start(start);
+        oscillator.stop(start + duration + .02);
+      }
+
+      function startMusic() {
+        if (musicTimer || !audioContext || !audioEnabled) return;
+        const melody = [261.63, 329.63, 392.00, 329.63, 293.66, 349.23, 440.00, 349.23];
+        musicTimer = setInterval(() => {
+          if (audioContext?.state !== 'running') return;
+          playTone(melody[musicStep % melody.length], .52, 'sine', .018);
+          musicStep++;
+        }, 720);
+      }
+
+      function setAudioEnabled(enabled) {
+        audioEnabled = enabled;
+        localStorage.setItem('merge2048-audio', enabled ? 'on' : 'off');
+        soundToggle.textContent = enabled ? 'Audio: ON' : 'Audio: OFF';
+        soundToggle.setAttribute('aria-pressed', String(enabled));
+        soundToggle.setAttribute('aria-label', enabled ? 'Silenciar sonidos y música' : 'Activar sonidos y música');
+        if (!enabled) {
+          if (musicTimer) { clearInterval(musicTimer); musicTimer = null; }
+          if (masterGain && audioContext) masterGain.gain.setTargetAtTime(0, audioContext.currentTime, .04);
+        } else {
+          ensureAudio();
+          if (masterGain && audioContext) masterGain.gain.setTargetAtTime(.17, audioContext.currentTime, .04);
+          playTone(523.25, .1, 'triangle', .06);
+        }
+      }
 
       const emptyBoard = () => Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
       const clone = value => JSON.parse(JSON.stringify(value));
@@ -255,6 +320,7 @@
         score += gained;
         if (score > best) { best = score; localStorage.setItem('merge2048-best', best); }
         addRandomTile();
+        playTone(gained ? 440 + Math.min(gained, 1024) / 4 : 220, .11, gained ? 'triangle' : 'sine', .07);
         render();
         if (!won && board.some(row => row.includes(2048))) showWin();
         else if (!canMove()) showGameOver();
@@ -271,6 +337,7 @@
 
       function showWin() {
         won = true; keepPlaying = false;
+        [523.25, 659.25, 783.99].forEach((note, index) => playTone(note, .28, 'triangle', .1, index * .11));
         overlayKicker.textContent = '¡Lo lograste!';
         overlayTitle.textContent = 'Llegaste al 2048';
         overlayCopy.textContent = 'Una jugada brillante. ¿Te animas a superar tu récord?';
@@ -279,6 +346,7 @@
       }
 
       function showGameOver() {
+        playTone(164.81, .35, 'sawtooth', .06);
         overlayKicker.textContent = 'Partida terminada';
         overlayTitle.textContent = 'No quedan movimientos';
         overlayCopy.textContent = `Tu puntuación fue ${format(score)}. ¡Inténtalo de nuevo!`;
@@ -310,9 +378,13 @@
       }, { passive: true });
       document.addEventListener('keydown', handleKey);
       undoBtn.addEventListener('click', undo);
+      soundToggle.addEventListener('click', () => setAudioEnabled(!audioEnabled));
       newGameBtn.addEventListener('click', startGame);
       restartBtn.addEventListener('click', startGame);
       continueBtn.addEventListener('click', () => { keepPlaying = true; overlay.hidden = true; });
+      soundToggle.textContent = audioEnabled ? 'Audio: ON' : 'Audio: OFF';
+      soundToggle.setAttribute('aria-pressed', String(audioEnabled));
+      soundToggle.setAttribute('aria-label', audioEnabled ? 'Silenciar sonidos y música' : 'Activar sonidos y música');
       startGame();
     })();
   </script>
